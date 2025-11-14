@@ -15,22 +15,22 @@ using namespace std;
 
 #define M_SIGMA 1.
 
-double g, hight, v, t;
+double g, height, v, t;
 
 double dt;
 
 void fall_init(double x0, double gravity) {
   g = gravity;
-  hight = x0;
+  height = x0;
   v = 0;
 }
 
 // falling with noise injected and control input u.
 double falling(double noise_p, double noise_g, double u) {
-  hight = hight + dt * v + dt * noise_p;
+  height = height + dt * v + dt * noise_p;
   v = v - dt * (g + noise_g) + dt * u;
 
-  return (hight);
+  return (height);
 }
 
 int main(void) {
@@ -80,13 +80,14 @@ int main(void) {
 
   double t = 0;
 
-  Eigen::VectorXd y(m);
+  Eigen::VectorXd y(m);  // estimated height for the kalman filter
 
   y << falling(0., 0., 0.);  // initialize estimated
 
-  fprintf(log, "%f\t %f\t%f\t%f\t%f\t %f\t%f\n", t, y(0), kf.state()[0],
-          kf.state()[1], kf.state()[2], hight, v);
-  // prints the time, measured height, est pos, est velocity, and est gravity
+  fprintf(log, "%f\t %f\t%f\t%f\t%f\t %f\t%f\t%f\n", t, y(0), kf.state()[0],
+          kf.state()[1], kf.state()[2], height, v, 0.0);
+  // prints the time, measured height, est pos, est velocity, est gravity, true
+  // height, true velocity, control
 
   // LQR definitions
 
@@ -112,19 +113,42 @@ int main(void) {
   int horizon = 10;
   DARE contr(A_lqr, B_lqr, Q_lqr, R_lqr, horizon);
 
+  Eigen::VectorXd x(n);  // State vector
+  Eigen::VectorXd u(1);  // Control inputm 1D, just velocity
+
+  x << height, v, g;  // Initial state from physics
+
   contr.init();
+
+  int step_counter = 0;  // Track simulation steps
 
   while (y[0] > 0.) {
     t += dt;
 
-    kf.update(y);
-    fprintf(log, "%f\t %f\t%f\t%f\t%f\t %f\t%f\n", t, y(0), kf.state()[0],
-            kf.state()[1], kf.state()[2], hight, v);
-    // prints the time, measured height, est pos, est velocity, and est
-    // gravity
-    y << falling(p_noise_h(generator), p_noise_g(generator), 0.);
-    // ADD COME NOISE
+    kf.update(y);  // takes a new measurement
+
+    // Get state estimate from Kalman filter
+    Eigen::VectorXd x_hat = kf.state();  // returns estimated state
+
+    // For LQR control: use steady-state gain (K from the end of horizon)
+    // This is common practice when simulation time > horizon
+    int k_index =
+        min(step_counter, horizon - 1);  // Use last K if beyond horizon
+
+    // Compute optimal control using LQR gains
+
+    u = -1 * contr.getK(k_index) * x_hat;
+
+    fprintf(log, "%f\t %f\t%f\t%f\t%f\t %f\t%f\t%f\n", t, y(0), kf.state()[0],
+            kf.state()[1], kf.state()[2], height, v, u[0]);
+    // prints the time, measured height, est pos, est velocity, est gravity,
+    // true height, true velocity, control
+
+    y << falling(p_noise_h(generator), p_noise_g(generator), u[0]);
+    // ADD SOME NOISE
     y(0) += m_noise(generator);
+
+    step_counter++;
   }
   fflush(log);
   fclose(log);
