@@ -1,14 +1,23 @@
+#include <Eigen/Dense>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <random>
 #include <stdexcept>
 
 #include "DARE.h"
+#include "kalman.hpp"
 
 using namespace std;
 
-// Physics variables and functions from fall.cpp
-double g, hight, v, dt;  // Make dt global
+#define P_SIGMA_H 0.01  // position noise
+#define P_SIGMA_G 0.1   // gravity noise
+
+#define M_SIGMA 1.
+
+double g, hight, v, t;
+
+double dt;
 
 void fall_init(double x0, double gravity) {
   g = gravity;
@@ -16,106 +25,127 @@ void fall_init(double x0, double gravity) {
   v = 0;
 }
 
+// falling with noise injected and control input u.
 double falling(double noise_p, double noise_g, double u) {
   hight = hight + dt * v + dt * noise_p;
   v = v - dt * (g + noise_g) + dt * u;
+
   return (hight);
 }
 
-void setup(void) {
-  int n = 2;
-  dt = 1.0 / 30.;  // Set global dt
+int main(void) {
+  // Kalman filter setup
+  int n = 3;  // Number of states
+  int m = 1;  // Number of measurements
 
-  int horizon = 10;
-
-  // Noise generators
+  // SOME NOISE
   std::default_random_engine generator;
-  std::normal_distribution<double> p_noise_h(0.0, 0.01 * 0.01);
-  std::normal_distribution<double> p_noise_g(0.0, 0.1 * 0.1);
+  std::normal_distribution<double> p_noise_h(0.0, P_SIGMA_H * P_SIGMA_H);
+  std::normal_distribution<double> p_noise_g(0.0, P_SIGMA_G * P_SIGMA_G);
+  std::normal_distribution<double> m_noise(0.0, M_SIGMA * M_SIGMA);
 
-  ofstream myfile;
-  myfile.open("OUT");
+  dt = 1.0 / 30;  // Time step
+
+  Eigen::MatrixXd A(n, n);  // System dynamics matrix
+  Eigen::MatrixXd C(m, n);  // Output matrix
+  Eigen::MatrixXd Q(n, n);  // Process noise covariance
+  Eigen::MatrixXd R(m, m);  // Measurement noise covariance
+  Eigen::MatrixXd P(n, n);  // Estimate error covariance
+
+  A << 1., dt, 0, 0, 1, dt, 0, 0,
+      1;  // the last row is 0 0 1 cause gravity is treated like a constant
+
+  C << 1, 0, 0;
+
+  // Reasonable covariance matrices
+  Q << P_SIGMA_H * P_SIGMA_H, 0., 0, 0, 0, 0, 0, 0, P_SIGMA_G * P_SIGMA_G;
+  R << M_SIGMA * M_SIGMA;
+
+  P << 1, 0, 0, 0, 1, 0, 0, 0, 1;
+  // initilze the kalman filter
+  KalmanFilter kf(dt, A, C, Q, R, P);
+
+  // initial guess at pos
+  Eigen::VectorXd x0(n);
+  // The third is initial guess of gravity
+  x0 << 110, 0, 0;
+  // x0 << 100,0,2; ///  WOrks even with wrong sign
+  kf.init(dt, x0);
+
+  // true values of the system
+  fall_init(100, 5.5);  // Physical conditions
+
+  FILE* log;
+  log = fopen("Data", "w");
+
+  double t = 0;
+
+  Eigen::VectorXd y(m);
+
+  y << falling(0., 0., 0.);  // initialize estimated
+
+  fprintf(log, "%f\t %f\t%f\t%f\t%f\t %f\t%f\n", t, y(0), kf.state()[0],
+          kf.state()[1], kf.state()[2], hight, v);
+  // prints the time, measured height, est pos, est velocity, and est gravity
+
+  // LQR definitions
 
   // SISO
-  Eigen::MatrixXd A(n, n);
-  Eigen::MatrixXd B(n, 1);
+  Eigen::MatrixXd A_lqr(n, n);
+  Eigen::MatrixXd B_lqr(n, 1);
 
-  Eigen::MatrixXd Q(n, n);
-  Eigen::MatrixXd R(1, 1);
+  Eigen::MatrixXd Q_lqr(n, n);
+  Eigen::MatrixXd R_lqr(1, 1);
 
-  // System dynamics (2x2 matrix) - corrected to match fall.cpp physics
-  A << 1., dt,  // height = height + dt*velocity
-      0.,
-      1.;  // velocity = velocity - dt*g + dt*u (gravity handled in simulation)
-  B << 0., dt;  // Control only affects velocity (second state)
+  // System dynamics (3x3 matrix) - corrected to match fall.cpp physics
+  A_lqr << 1., dt, 0,  // height = height + dt*velocity + 0*gravity
+      0., 1, -dt,      // velocity = velocity - dt*gravity + dt*u
+      0., 0, 1;        // gravity = gravity (constant)
 
-  Q.setIdentity();  // State cost matrix (2x2 identity)
-  R << 1;           // Control cost matrix (1x1 scalar)
+  B_lqr << 0,  // position not directly affected by control
+      dt,      // velocity affected by dt*u
+      0;       // gravity not affected by control
 
-  // Construct the SYSTEM
-  DARE contr(A, B, Q, R, horizon);
+  Q_lqr.setIdentity();  // State cost matrix (2x2 identity)
+  R_lqr << 1;           // Control cost matrix (1x1 scalar)
+
+  int horizon = 10;
+  DARE contr(A_lqr, B_lqr, Q_lqr, R_lqr, horizon);
 
   contr.init();
 
-  contr.print();
+  while (y[0] > 0.) {
+    t += dt;
 
-  // Initialize physics from fall.cpp
-  fall_init(100.0, 9.81);  // Start at height=100.0, gravity=9.81
+    kf.update(y);
+    fprintf(log, "%f\t %f\t%f\t%f\t%f\t %f\t%f\n", t, y(0), kf.state()[0],
+            kf.state()[1], kf.state()[2], hight, v);
+    // prints the time, measured height, est pos, est velocity, and est
+    // gravity
+    y << falling(p_noise_h(generator), p_noise_g(generator), 0.);
+    // ADD COME NOISE
+    y(0) += m_noise(generator);
+  }
+  fflush(log);
+  fclose(log);
+  // printing with gnuplot
+  string cmd =
+      "gnuplot -persist -e \""
+      "set title 'Fall + Kalman (height)'; "
+      "set xlabel 'time [s]'; "
+      "set ylabel 'height [m]'; "
+      "plot "
+      "'Data' using 1:2 with points pointtype 7 pointsize 0.5 title "
+      "'measured "
+      "h', "
+      "'Data' using 1:3 with lines lw 2 title 'estimated h', "
+      "'Data' using 1:6 with lines lw 2 dashtype 2 title 'true h',"
+      "'Data' using 1:4 with lines lw 2 dashtype 3 title 'est vel', "
+      "'Data' using 1:5 with lines lw 2 title 'estimated g'\"";
 
-  // RUN SYSTEM WITH THAT CONTROLLER !
-  // const IOFormat fmt(5, DontAlignCols, "\t", " ", "", "", "", "");
-  // Eigen::IOFormat fmt(5, 0, ", ", ";\n", "[", "]", "[", "]");
-  Eigen::IOFormat fmt(5, 0, ", ", " ", "", "", "", "");
+  system(cmd.c_str());
 
-  Eigen::VectorXd x(n);  // State vector
-  Eigen::VectorXd u(1);  // Control input
-
-  x << hight, v;  // Initial state from physics
-
-  // Write header for data file
-  myfile << "# Time Position Velocity Control" << std::endl;
-
-  for (int i = 0; i < horizon; i++) {
-    u = -1 * contr.getK(i) * x;  // Compute optimal control
-    // x = A * x + B * u;           // Apply control and update state
-
-    // Use physics from fall.cpp instead of x = A*x + B*u
-    falling(p_noise_h(generator), p_noise_g(generator),
-            u[0]);  // modifying global variables
-
-    // Update state vector with current physics state
-    x[0] = hight;
-    x[1] = v;
-
-    // Print state and control values
-    std::cout << "Step " << i << ": height=" << x[0] << ", velocity=" << x[1]
-              << ", control=" << u[0] << std::endl;
-    myfile << i * dt << " " << x.format(fmt) << " " << u[0] << std::endl;
-  };
-  myfile.close();
-
-  // Create gnuplot script
-  ofstream gnuplot_script;
-  gnuplot_script.open("plot_script.gp");
-  gnuplot_script << "set terminal png size 800,600" << std::endl;
-  gnuplot_script << "set output 'lqr_control.png'" << std::endl;
-  gnuplot_script << "set title 'LQR Controller - State Trajectory'"
-                 << std::endl;
-  gnuplot_script << "set xlabel 'Time (seconds)'" << std::endl;
-  gnuplot_script << "set ylabel 'State Value'" << std::endl;
-  gnuplot_script << "set grid" << std::endl;
-  gnuplot_script << "plot 'OUT' using 1:2 with lines title 'Position', \\"
-                 << std::endl;
-  gnuplot_script << "     'OUT' using 1:3 with lines title 'Velocity'"
-                 << std::endl;
-  gnuplot_script.close();
-
-  // Execute gnuplot
-  system("gnuplot plot_script.gp");
-  std::cout << "Plot saved as 'lqr_control.png'" << std::endl;
-}
-
-int main(void) {
-  setup();
   return (0);
 }
+
+// g++ -I /usr/include/eigen3 -I . main.cpp DARE.cpp kalman.cpp -o lander
