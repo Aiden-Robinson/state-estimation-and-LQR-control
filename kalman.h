@@ -16,6 +16,7 @@ public:
   KalmanFilter(
       double dt,
       const Eigen::MatrixXd& A,
+      const Eigen::MatrixXd& B,
       const Eigen::MatrixXd& C,
       const Eigen::MatrixXd& Q,
       const Eigen::MatrixXd& R,
@@ -27,7 +28,7 @@ public:
   void init();
   void init(double t0, const Eigen::VectorXd& x0);
 
-  void update(const Eigen::VectorXd& y);
+  void update(const Eigen::VectorXd& y,double u);
 
   void update(const Eigen::VectorXd& y, double dt, const Eigen::MatrixXd A);
 
@@ -36,7 +37,7 @@ public:
 
 //private: // Nothing private , so we can plot the data ...
 
-  Eigen::MatrixXd A, C, Q, R, P, K, P0;
+  Eigen::MatrixXd A, B, C, Q, R, P, K, P0;
 
   int m, n;
 

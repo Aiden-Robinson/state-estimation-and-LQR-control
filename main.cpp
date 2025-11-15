@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 #include "DARE.h"
-#include "kalman.hpp"
+#include "kalman.h"
 
 using namespace std;
 
@@ -54,6 +54,7 @@ int main(void) {
 
   A << 1., dt, 0, 0, 1, dt, 0, 0,
       1;  // the last row is 0 0 1 cause gravity is treated like a constant
+          // Note: -dt for gravity because v = v - dt*g + dt*u
 
   C << 1, 0, 0;
 
@@ -62,8 +63,15 @@ int main(void) {
   R << M_SIGMA * M_SIGMA;
 
   P << 1, 0, 0, 0, 1, 0, 0, 0, 1;
+
+  // Define B matrix for control input (matches B_lqr)
+  Eigen::MatrixXd B(n, 1);
+  B << 0,  // position not directly affected by control
+      dt,  // velocity affected by dt*u
+      0;   // gravity not affected by control
+
   // initilze the kalman filter
-  KalmanFilter kf(dt, A, C, Q, R, P);
+  KalmanFilter kf(dt, A, B, C, Q, R, P);
 
   // initial guess at pos
   Eigen::VectorXd x0(n);
@@ -84,6 +92,9 @@ int main(void) {
 
   y << falling(0., 0., 0.);  // initialize estimated
 
+  // Initial update with zero control
+  kf.update(y, 0.0);
+
   fprintf(log, "%f\t %f\t%f\t%f\t%f\t %f\t%f\t%f\n", t, y(0), kf.state()[0],
           kf.state()[1], kf.state()[2], height, v, 0.0);
   // prints the time, measured height, est pos, est velocity, est gravity, true
@@ -100,7 +111,7 @@ int main(void) {
 
   // System dynamics (3x3 matrix) - corrected to match fall.cpp physics
   A_lqr << 1., dt, 0,  // height = height + dt*velocity + 0*gravity
-      0., 1, -dt,      // velocity = velocity - dt*gravity + dt*u
+      0., 1, dt,       // velocity = velocity - dt*gravity + dt*u
       0., 0, 1;        // gravity = gravity (constant)
 
   B_lqr << 0,  // position not directly affected by control
@@ -110,7 +121,7 @@ int main(void) {
   Q_lqr.setIdentity();  // State cost matrix (2x2 identity)
   R_lqr << 1;           // Control cost matrix (1x1 scalar)
 
-  int horizon = 10;
+  int horizon = 150;
   DARE contr(A_lqr, B_lqr, Q_lqr, R_lqr, horizon);
 
   Eigen::VectorXd x(n);  // State vector
@@ -125,8 +136,7 @@ int main(void) {
   while (y[0] > 0.) {
     t += dt;
 
-    kf.update(y);  // takes a new measurement
-
+    // Compute optimal control using LQR gains first
     // Get state estimate from Kalman filter
     Eigen::VectorXd x_hat = kf.state();  // returns estimated state
 
@@ -136,8 +146,10 @@ int main(void) {
         min(step_counter, horizon - 1);  // Use last K if beyond horizon
 
     // Compute optimal control using LQR gains
-
     u = -1 * contr.getK(k_index) * x_hat;
+
+    kf.update(y, u[0]);  // takes a new measurement and control inputrement and
+                         // control input
 
     fprintf(log, "%f\t %f\t%f\t%f\t%f\t %f\t%f\t%f\n", t, y(0), kf.state()[0],
             kf.state()[1], kf.state()[2], height, v, u[0]);
