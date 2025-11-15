@@ -170,6 +170,8 @@ int main(void) {
       "set title 'Fall + Kalman (height)'; "
       "set xlabel 'time [s]'; "
       "set ylabel 'height [m]'; "
+      "set ytics 5; "
+      "set grid; "
       "plot "
       "'Data' using 1:2 with points pointtype 7 pointsize 0.5 title "
       "'measured "
